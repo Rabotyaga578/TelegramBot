@@ -1,62 +1,266 @@
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-import requests
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import json
+import os
+import random
+from datetime import datetime
+import pandas as pd
 
-# Вставьте сюда токен, который вы получили от @BotFather
-BOT_TOKEN = "8450057853:AAGVsuOUyK0s3F3LsrC07wGwgukC6e7V8GI"
+SELECT_QUESTION, ANSWER_QUESTION = range(2)
+DATA_FILE = "coffee_bot_data.json"
+EXCEL_FILE = "winners.xlsx"
 
-# Функция-обработчик команды /start
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Привет! Я бот. Отправь мне любое сообщение, и я его повторю!')
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {"questions": {}, "user_answers": {}}
 
-# Функция-обработчик команды /help
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Просто напиши что-нибудь, и я отвечу!')
+def save_data(data):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-# Функция-обработчик обычных текстовых сообщений
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Получаем текст сообщения от пользователя
-    user_message = update.message.text
-    # Просто возвращаем его обратно
-    await update.message.reply_text(f"Вы сказали: {user_message}")
+def init_excel():
+    if not os.path.exists(EXCEL_FILE):
+        data = []
+        for i in range(1, 101):
+            data.append({'question_number': i, 'username': '', 'date': ''})
+        df = pd.DataFrame(data)
+        df.to_excel(EXCEL_FILE, index=False)
 
-# Обработчик команды /btc - показывает цену биткоина
-async def btc_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def save_winner_to_excel(question_number, username):
     try:
-        # Используем бесплатный API CoinGecko
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-        response = requests.get(url)
-        data = response.json()
+        df = pd.read_excel(EXCEL_FILE)
+        question_row = df[df['question_number'] == int(question_number)]
         
-        price = data['bitcoin']['usd']
-        await update.message.reply_text(f"💰 Цена Биткоина: ${price}")
+        if not question_row.empty:
+            index = question_row.index[0]
+            if pd.isna(df.at[index, 'username']) or df.at[index, 'username'] == '':
+                df.at[index, 'username'] = username
+                df.at[index, 'date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                df.to_excel(EXCEL_FILE, index=False)
+                return True
+        return False
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        return False
+
+def is_question_available(question_number):
+    try:
+        df = pd.read_excel(EXCEL_FILE)
+        question_row = df[df['question_number'] == int(question_number)]
+        if not question_row.empty:
+            index = question_row.index[0]
+            username = df.at[index, 'username']
+            return pd.isna(username) or username == ''
+        return False
     except:
-        await update.message.reply_text("❌ Не удалось получить цену биткоина")
+        return False
 
-# Обработчик ошибок
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"Ошибка: {context.error}")
+def get_available_questions():
+    try:
+        df = pd.read_excel(EXCEL_FILE)
+        available = df[(pd.isna(df['username'])) | (df['username'] == '')]['question_number'].tolist()
+        return [str(int(q)) for q in available]
+    except:
+        return [str(i) for i in range(1, 101)]
 
-# Основная функция
-def main():
-    # Создаем приложение и передаем ему токен
-    app = Application.builder().token(BOT_TOKEN).build()
+def get_user_answered_questions(user_id):
+    data = load_data()
+    user_answers = data["user_answers"].get(user_id, {})
+    return list(user_answers.keys())
 
-    # Добавляем обработчики команд
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("btc", btc_command))
+def init_questions():
+    data = load_data()
+    if not data["questions"]:
+        questions = {}
+        coffee_questions = [
+            {"question": "Сколько градусов должна быть вода для идеального заваривания кофе?", "answer": "90-96"},
+            {"question": "Как называется кофейный напиток с молоком?", "answer": "латте"},
+            {"question": "В какой стране больше всего пьют кофе?", "answer": "финляндия"},
+            {"question": "Какой сорт кофе считается самым дорогим в мире?", "answer": "копи лувак"},
+            {"question": "Сколько мл в стандартной чашке эспрессо?", "answer": "30"}
+        ]
+        
+        for i in range(1, 101):
+            if i <= len(coffee_questions):
+                questions[str(i)] = coffee_questions[i-1]
+            else:
+                questions[str(i)] = {"question": f"Кофейный досье #{i}", "answer": f"ответ{i}"}
+        
+        data["questions"] = questions
+        save_data(data)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    welcome_text = f"""☕Добро пожаловать в библиотеку «Фабрика кофе»!», {user.first_name}!
+
+🎯 Здесь мы будем разгадывать досье, чтобы принять участие в розыгрыше призов!
+
+📝 Правила:
+
+• При покупке любого напитка из осеннего меню в нашей Фабрике - вы получаете на руки одно досье: самое время его разгадать и назвать имя подозреваемого 🕵
+
+•Чем больше досье вы разгадаете, тем больше шансов выиграть приз!
+
+🏆 Итоги розыгрыша будут в нашем Telegram канале!
+
+Уже получил свое досье? Тогда давай приступим к игре!
+
+🎁 Чтобы приступить к разгадке - напишите ниже номер досье, которое вам попалось (1-100)"""
     
-    # Добавляем обработчик текстовых сообщений (НЕ команд)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    keyboard = [
+        [KeyboardButton("📋 Список свободных досье")],
+        [KeyboardButton("🏆 Мои досье"), KeyboardButton("❓ Помощь")]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    return SELECT_QUESTION
 
-    # Добавляем обработчик ошибок
-    app.add_error_handler(error_handler)
+async def show_available_questions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        available_questions = get_available_questions()
+        if available_questions:
+            text = "📋 Свободные досье:\n" + "\n".join([f"• досье {q}" for q in available_questions[:15]])
+            if len(available_questions) > 15:
+                text += f"\n\n... и еще {len(available_questions) - 15} свободных досье!"
+        else:
+            text = "❌ Все досье уже заняты!"
+        text += "\n\n📝 Чтобы разгадать досье, напишите его номер"
+        await update.message.reply_text(text)
+    except:
+        await update.message.reply_text("📋 Попробуйте выбрать любой досье от 1 до 100")
 
-    # Запускаем бота на опрос серверов Telegram
-    print("Бот запущен...")
+async def show_my_answers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    answered_questions = get_user_answered_questions(user_id)
+    
+    if answered_questions:
+        text = "🏆 Ваши разгаданные ответы:\n" + "\n".join([f"• досье {q}" for q in answered_questions])
+        text += f"\n\n🎯 Всего правильных досье: {len(answered_questions)}"
+    else:
+        text = "📝 Вы еще не разгадали ни одиин досье."
+    
+    text += "\n\n🎁 Продолжайте участвовать в розыгрыше!"
+    await update.message.reply_text(text)
+
+async def select_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.message.from_user.id)
+    user_input = update.message.text
+    data = load_data()
+    
+    if user_input == "📋 Список свободных досье":
+        await show_available_questions(update, context)
+        return SELECT_QUESTION
+    elif user_input == "🏆 Мои ответы":
+        await show_my_answers(update, context)
+        return SELECT_QUESTION
+    elif user_input == "❓ Помощь":
+        await help_command(update, context)
+        return SELECT_QUESTION
+    
+    if not user_input.isdigit() or not (1 <= int(user_input) <= 100):
+        await update.message.reply_text("❌ досье с таким номером не найден. Выберите номер от 1 до 100")
+        return SELECT_QUESTION
+    
+    question_number = user_input
+    
+    # Проверяем, не отвечал ли пользователь уже на ЭТОТ досье
+    user_answers = data["user_answers"].get(user_id, {})
+    if question_number in user_answers:
+        await update.message.reply_text("❌ Вы уже отвечали на этот досье!")
+        return SELECT_QUESTION
+    
+    if not is_question_available(question_number):
+        await update.message.reply_text("❌ Ксожалению этот досье уже занят! Выберите другой досье.")
+        return SELECT_QUESTION
+    
+    context.user_data['current_question'] = question_number
+    await update.message.reply_text(f"❓ Досье#{question_number}\n\n📝 Напишите ваш ответ! Кто этот подозреваемый?")
+    return ANSWER_QUESTION
+
+async def answer_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_answer = update.message.text.lower().strip()
+    user_id = str(update.message.from_user.id)
+    user = update.message.from_user
+    question_number = context.user_data.get('current_question')
+    
+    data = load_data()
+    question_data = data["questions"][question_number]
+    correct_answer = question_data["answer"].lower().strip()
+    
+    if user_answer == correct_answer:
+        username = f"@{user.username}" if user.username else f"{user.first_name} {user.last_name or ''}".strip()
+        
+        if save_winner_to_excel(question_number, username):
+            # Сохраняем ответ пользователя
+            if user_id not in data["user_answers"]:
+                data["user_answers"][user_id] = {}
+            
+            data["user_answers"][user_id][question_number] = {
+                "username": username,
+                "date": datetime.now().isoformat()
+            }
+            save_data(data)
+            
+            # Получаем количество ответов пользователя
+            user_answers_count = len(data["user_answers"][user_id])
+            
+            success_text = f"""🎉 ПРАВИЛЬНО! 
+
+🏆 Вы успешно ответили на досье #{question_number}!
+
+📊 Всего ваших правильных ответов: {user_answers_count}
+
+📢 Итоги розыгрыша в нашем канале:
+
+👉 @fabrika_coffee_life 👈
+
+💫 Чем больше правильных ответов - тем выше шанс на приз!"""
+            
+            await update.message.reply_text(success_text)
+        else:
+            await update.message.reply_text("❌ Этот досье уже занят другим участником.")
+    else:
+        await update.message.reply_text("❌ К сожалению, ответ неверный. Попробуйте другой досье!")
+    
+    context.user_data.pop('current_question', None)
+    return SELECT_QUESTION  # Возвращаем к выбору досье вместо END
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = """❓ Помощь:
+
+📝 Розыгрыш призов:
+• Разгадыай ЛЮБОЕ количество досье
+• Выберите номер досье от 1 до 100
+• Правильный ответ = шанс на приз
+• Чем больше ответов - тем выше шанс!
+
+🏆 Итоги в канале: @fabrika_coffee_life
+
+🎯 Команды:
+• Список свободных досье - доступные досье
+• Мои ответы - ваши правильные ответы"""
+    await update.message.reply_text(help_text)
+
+def main():
+    init_questions()
+    init_excel()
+    app = Application.builder().token("8450057853:AAGVsuOUyK0s3F3LsrC07wGwgukC6e7V8GI").build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start_command)],
+        states={
+            SELECT_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_question)],
+            ANSWER_QUESTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, answer_question)],
+        },
+        fallbacks=[CommandHandler("help", help_command)]
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("help", help_command))
+    print("☕ Бот запущен...")
     app.run_polling()
 
-# Точка входа
 if __name__ == '__main__':
     main()
