@@ -2,13 +2,12 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import json
 import os
-import random
+import csv
 from datetime import datetime
-import pandas as pd
 
 SELECT_QUESTION, ANSWER_QUESTION = range(2)
 DATA_FILE = "coffee_bot_data.json"
-EXCEL_FILE = "winners.xlsx"
+CSV_FILE = "winners.csv"
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -20,48 +19,61 @@ def save_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def init_excel():
-    if not os.path.exists(EXCEL_FILE):
-        data = []
-        for i in range(1, 101):
-            data.append({'question_number': i, 'username': '', 'date': ''})
-        df = pd.DataFrame(data)
-        df.to_excel(EXCEL_FILE, index=False)
+def init_csv():
+    if not os.path.exists(CSV_FILE):
+        with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['question_number', 'username', 'date'])
 
-def save_winner_to_excel(question_number, username):
+def save_winner_to_csv(question_number, username):
     try:
-        df = pd.read_excel(EXCEL_FILE)
-        question_row = df[df['question_number'] == int(question_number)]
+        # Сначала проверяем, не занят ли уже вопрос
+        winners = {}
+        if os.path.exists(CSV_FILE):
+            with open(CSV_FILE, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    winners[row['question_number']] = row
         
-        if not question_row.empty:
-            index = question_row.index[0]
-            if pd.isna(df.at[index, 'username']) or df.at[index, 'username'] == '':
-                df.at[index, 'username'] = username
-                df.at[index, 'date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                df.to_excel(EXCEL_FILE, index=False)
-                return True
-        return False
+        # Проверяем, не занят ли вопрос
+        if question_number in winners:
+            return False
+        
+        # Добавляем нового победителя
+        with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow([question_number, username, datetime.now().strftime("%Y-%m-%d %H:%M:%S")])
+        return True
     except Exception as e:
         print(f"Ошибка: {e}")
         return False
 
 def is_question_available(question_number):
     try:
-        df = pd.read_excel(EXCEL_FILE)
-        question_row = df[df['question_number'] == int(question_number)]
-        if not question_row.empty:
-            index = question_row.index[0]
-            username = df.at[index, 'username']
-            return pd.isna(username) or username == ''
-        return False
+        if not os.path.exists(CSV_FILE):
+            return True
+        
+        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['question_number'] == question_number:
+                    return False
+        return True
     except:
-        return False
+        return True
 
 def get_available_questions():
     try:
-        df = pd.read_excel(EXCEL_FILE)
-        available = df[(pd.isna(df['username'])) | (df['username'] == '')]['question_number'].tolist()
-        return [str(int(q)) for q in available]
+        if not os.path.exists(CSV_FILE):
+            return [str(i) for i in range(1, 101)]
+        
+        taken_questions = set()
+        with open(CSV_FILE, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                taken_questions.add(row['question_number'])
+        
+        return [str(i) for i in range(1, 101) if str(i) not in taken_questions]
     except:
         return [str(i) for i in range(1, 101)]
 
@@ -152,7 +164,7 @@ async def select_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_input == "📋 Список свободных досье":
         await show_available_questions(update, context)
         return SELECT_QUESTION
-    elif user_input == "🏆 Мои ответы":
+    elif user_input == "🏆 Мои досье":
         await show_my_answers(update, context)
         return SELECT_QUESTION
     elif user_input == "❓ Помощь":
@@ -165,7 +177,6 @@ async def select_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     question_number = user_input
     
-    # Проверяем, не отвечал ли пользователь уже на ЭТОТ досье
     user_answers = data["user_answers"].get(user_id, {})
     if question_number in user_answers:
         await update.message.reply_text("❌ Вы уже отвечали на этот досье!")
@@ -192,8 +203,7 @@ async def answer_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_answer == correct_answer:
         username = f"@{user.username}" if user.username else f"{user.first_name} {user.last_name or ''}".strip()
         
-        if save_winner_to_excel(question_number, username):
-            # Сохраняем ответ пользователя
+        if save_winner_to_csv(question_number, username):
             if user_id not in data["user_answers"]:
                 data["user_answers"][user_id] = {}
             
@@ -203,7 +213,6 @@ async def answer_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             save_data(data)
             
-            # Получаем количество ответов пользователя
             user_answers_count = len(data["user_answers"][user_id])
             
             success_text = f"""🎉 ПРАВИЛЬНО! 
@@ -225,7 +234,7 @@ async def answer_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ К сожалению, ответ неверный. Попробуйте другой досье!")
     
     context.user_data.pop('current_question', None)
-    return SELECT_QUESTION  # Возвращаем к выбору досье вместо END
+    return SELECT_QUESTION
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """❓ Помощь:
@@ -240,12 +249,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🎯 Команды:
 • Список свободных досье - доступные досье
-• Мои ответы - ваши правильные ответы"""
+• Мои досье - ваши правильные ответы"""
     await update.message.reply_text(help_text)
 
 def main():
     init_questions()
-    init_excel()
+    init_csv()
     app = Application.builder().token("8450057853:AAGVsuOUyK0s3F3LsrC07wGwgukC6e7V8GI").build()
     
     conv_handler = ConversationHandler(
